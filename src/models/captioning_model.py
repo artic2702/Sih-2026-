@@ -48,7 +48,7 @@ class CaptioningModel(BaseRSModel):
         print(f"[CaptioningModel] Loading {model_id} on {self.device}...")
 
         self.processor = BlipProcessor.from_pretrained(model_id)
-        self.model = BlipForConditionalGeneration.from_pretrained(model_id)
+        self.model = BlipForConditionalGeneration.from_pretrained(model_id, use_safetensors=True)
 
         # Use half precision on GPU to save VRAM
         if self.device != "cpu":
