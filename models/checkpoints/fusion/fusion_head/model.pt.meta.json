@@ -1,0 +1,16 @@
+{
+  "model": "fusion_v1",
+  "backbone": "OpticalSAR-FeatureFusion",
+  "task": "fusion",
+  "dataset": "bigearthnet_mm",
+  "dataset_split": "train",
+  "epoch": 1,
+  "encoder_weights": {
+    "optical": "imagenet_pretrained",
+    "sar": "imagenet_pretrained"
+  },
+  "freeze_encoders": true,
+  "checkpoint_scope": "fusion_head_only",
+  "git_commit": "e7edcb4",
+  "date_utc": "2026-09-07T12:40:45.052596+00:00"
+}

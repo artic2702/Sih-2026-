@@ -4,6 +4,9 @@ co-registration compatibility of uploaded images before task routing.
 Owner: Person 4 (Agentic Orchestration + GUI).
 """
 
+import numpy as np
+import torch
+
 from src.preprocessing.geotiff_utils import read_image, check_coregistration, extract_metadata
 
 ALLOWED_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
@@ -39,10 +42,13 @@ def validate_input(images: dict, config: dict) -> dict:
                 "metadata": {}}
 
     # Format check
-    for key, path in images.items():
-        ext = "." + path.lower().rsplit(".", 1)[-1]
-        if ext not in ALLOWED_EXTENSIONS:
-            errors.append(f"{key}: unsupported format '{ext}'")
+    for key, val in images.items():
+        if isinstance(val, str):
+            ext = "." + val.lower().rsplit(".", 1)[-1]
+            if ext not in ALLOWED_EXTENSIONS:
+                errors.append(f"{key}: unsupported format '{ext}'")
+        elif not isinstance(val, (np.ndarray, torch.Tensor)):
+            errors.append(f"{key}: unsupported image input type {type(val)}")
 
     if errors:
         return {"valid": False, "mode": mode, "errors": errors, "metadata": {}}

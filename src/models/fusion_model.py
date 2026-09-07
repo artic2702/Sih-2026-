@@ -37,6 +37,7 @@ with random-init encoders is a legitimate SMOKE_TEST / architecture
 validation, NOT a reportable benchmark number — see docs/ML_AUDIT.md.
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -191,11 +192,28 @@ class FusionModel(BaseRSModel):
         self.fusion_head = FusionHead(optical_dim=512, sar_dim=512, num_classes=num_classes)
 
         self._checkpoint_loaded = False
-        try:
-            state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            self.fusion_head.load_state_dict(state["model_state_dict"])
-            self._checkpoint_loaded = True
-        except FileNotFoundError:
+        candidates = [
+            checkpoint_path,
+            checkpoint_path + ".pt",
+            "models/checkpoints/fusion/fusion_head/model.pt",
+            "models/checkpoints/fusion_head.pt",
+            "models/checkpoints/fusion/fusion_head",
+        ]
+        resolved_ckpt = None
+        for cand in candidates:
+            if cand and os.path.isfile(cand):
+                resolved_ckpt = cand
+                break
+
+        if resolved_ckpt is not None:
+            try:
+                state = torch.load(resolved_ckpt, map_location=device, weights_only=False)
+                self.fusion_head.load_state_dict(state["model_state_dict"])
+                self._checkpoint_loaded = True
+                self.checkpoint_path = resolved_ckpt
+            except Exception as e:
+                print(f"[fusion_model] Failed to load checkpoint from '{resolved_ckpt}': {e}")
+        else:
             print(
                 f"[fusion_model] No trained fusion-head checkpoint at "
                 f"'{checkpoint_path}' — fusion_head is freshly initialized "

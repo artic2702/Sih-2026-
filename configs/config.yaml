@@ -43,10 +43,10 @@ datasets:
     optical_sensor: "Sentinel-2"
     sar_sensor: "Sentinel-1"
     root: "data/raw/bigearthnet_mm"
-    optical_bands: [2, 3, 4, 8]
-    sar_bands: [1, 2]                 # Sentinel-1: VV, VH
+    optical_bands: [1, 2, 3, 7]       # Sentinel-2 12-band GeoTIFF: B02, B03, B04, B08
+    sar_bands: [0, 1]                 # Sentinel-1 2-band GeoTIFF: VV, VH
     optical_normalization: "percentile_2_98"
-    sar_normalization: "db_scale_minmax"   # convert to dB then min-max scale
+    sar_normalization: "db_minmax"   # Sentinel-1 in BigEarthNet is stored in dB; scale directly
     label_taxonomy: "bigearthnet_corine"   # multi-label land-cover classes the fusion head predicts
 
   vrsbench:
@@ -138,7 +138,7 @@ models:
     backbone: "OpticalSAR-FeatureFusion"
     owner: "person_4"
     image_size: 256
-    checkpoint: "models/checkpoints/fusion/fusion_head"
+    checkpoint: "models/checkpoints/fusion/fusion_head/model.pt"
     optical_encoder: "TODO: e.g. Sentinel-2-pretrained ResNet/ViT"
     sar_encoder: "TODO: e.g. Sentinel-1-pretrained encoder, or generic ResNet on dB-scaled SAR"
     adaptation_dataset: "bigearthnet_mm"

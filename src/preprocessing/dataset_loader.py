@@ -170,11 +170,24 @@ class BigEarthNetMMDataset(RSDataset):
 
     def __getitem__(self, idx):
         rec = self.samples[idx]
-        root = self.config["datasets"][self.dataset_name]["root"]
-        optical_img = read_image(os.path.join(root, rec["optical_path"]))
-        sar_img = read_image(os.path.join(root, rec["sar_path"]))
-        optical_arr = self._preprocess(optical_img.array, modality="optical")
-        sar_arr = self._preprocess(sar_img.array, modality="sar")
+        # Two supported index formats:
+        # 1) legacy JSON: optical_path / sar_path point to multi-band GeoTIFFs.
+        # 2) official BigEarthNet v2 preparation: optical_paths / sar_paths
+        #    list the four selected S2 bands and two S1 bands separately.
+        if "optical_paths" in rec and "sar_paths" in rec:
+            optical_arrays = [read_image(p).array.squeeze() for p in rec["optical_paths"]]
+            sar_arrays = [read_image(p).array.squeeze() for p in rec["sar_paths"]]
+            optical_raw = np.stack(optical_arrays, axis=0)
+            sar_raw = np.stack(sar_arrays, axis=0)
+        else:
+            root = self.config["datasets"][self.dataset_name]["root"]
+            optical_img = read_image(os.path.join(root, rec["optical_path"]))
+            sar_img = read_image(os.path.join(root, rec["sar_path"]))
+            optical_raw = optical_img.array
+            sar_raw = sar_img.array
+
+        optical_arr = self._preprocess(optical_raw, modality="optical")
+        sar_arr = self._preprocess(sar_raw, modality="sar")
         return {
             "image_optical": optical_arr,
             "image_sar": sar_arr,
