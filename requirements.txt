@@ -1,0 +1,35 @@
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+transformers>=4.40.0
+accelerate>=0.30.0
+peft>=0.10.0                # LoRA / adapter fine-tuning
+
+# Geospatial imagery
+rasterio>=1.3.9
+gdal ; platform_system != "Windows"
+Pillow>=10.0.0
+numpy>=1.26.0
+opencv-python>=4.9.0
+
+# Data / training utils
+pyyaml>=6.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+tqdm>=4.66.0
+tensorboard>=2.16.0
+
+# Metrics
+nltk>=3.8.1                 # BLEU
+rouge-score>=0.1.2
+pycocoevalcap>=1.2          # CIDEr (optional, for captioning eval)
+shapely>=2.0.0               # IoU / geometry for grounding
+
+# App / GUI
+streamlit>=1.35.0
+fastapi>=0.111.0             # optional if you split GUI/backend
+uvicorn>=0.29.0
+reportlab>=4.2.0             # PDF report generation
+
+# Testing
+pytest>=8.0.0
