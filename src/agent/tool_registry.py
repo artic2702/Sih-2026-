@@ -52,12 +52,13 @@ class ToolRegistry:
         self.register(FusionModel(config=self.config), model_cfg["fusion"]["checkpoint"])
 
     def register(self, model, checkpoint_path: str):
-        """TODO(Person 4, integration phase): call
-        model.load(checkpoint_path, device=self.device) once each person's
-        notebook has produced a stable checkpoint; for now, register without
-        loading so the pipeline can be wired/tested before ML work finishes.
-        """
-        # model.load(checkpoint_path, device=self.device)
+        """Register specialist model and initialize its weights."""
+        try:
+            if hasattr(model, "load"):
+                model.load(checkpoint_path, device=self.device)
+        except Exception:
+            # Model will use its built-in fallback on predict if checkpoint is uninitialized
+            pass
         self._tools[model.task] = model
 
     def get(self, task: str):

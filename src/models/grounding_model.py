@@ -363,6 +363,10 @@ class GroundingModel(BaseRSModel):
             except Exception:
                 pass
 
+        if isinstance(image, str):
+            from PIL import Image
+            image = np.array(Image.open(image).convert("RGB"))
+
         # Get image dimensions
         if isinstance(image, np.ndarray):
             if image.ndim == 3 and image.shape[0] in (1, 2, 3, 4):

@@ -224,11 +224,18 @@ class FusionModel(BaseRSModel):
 
     # -- inference -----------------------------------------------------
 
-    def _to_tensor(self, array) -> torch.Tensor:
+    def _to_tensor(self, array, expected_channels: int = None) -> torch.Tensor:
         if isinstance(array, np.ndarray):
             array = torch.from_numpy(array).float()
         if array.dim() == 3:
             array = array.unsqueeze(0)  # add batch dim
+        if expected_channels is not None:
+            c = array.shape[1]
+            if c > expected_channels:
+                array = array[:, :expected_channels]
+            elif c < expected_channels:
+                repeats = (expected_channels // c) + 1
+                array = array.repeat(1, repeats, 1, 1)[:, :expected_channels]
         return array.to(self.device)
 
     def _labels_to_text(self, probs: np.ndarray) -> str:
@@ -251,8 +258,8 @@ class FusionModel(BaseRSModel):
 
     def _forward(self, optical_arr, sar_arr) -> np.ndarray:
         with torch.no_grad():
-            optical_t = self._to_tensor(optical_arr)
-            sar_t = self._to_tensor(sar_arr)
+            optical_t = self._to_tensor(optical_arr, expected_channels=4)
+            sar_t = self._to_tensor(sar_arr, expected_channels=2)
             optical_feat = self.optical_encoder(optical_t)
             sar_feat = self.sar_encoder(sar_t)
             logits = self.fusion_head(optical_feat, sar_feat)
@@ -305,7 +312,7 @@ class FusionModel(BaseRSModel):
                 text="Fusion model not loaded — call load() first.", status="error")
         start = time.time()
         with torch.no_grad():
-            optical_t = self._to_tensor(image_optical)
+            optical_t = self._to_tensor(image_optical, expected_channels=4)
             optical_feat = self.optical_encoder(optical_t)
             sar_feat = torch.zeros(optical_feat.shape[0], self.fusion_head.sar_dim,
                                     device=self.device)
@@ -322,7 +329,7 @@ class FusionModel(BaseRSModel):
                 text="Fusion model not loaded — call load() first.", status="error")
         start = time.time()
         with torch.no_grad():
-            sar_t = self._to_tensor(image_sar)
+            sar_t = self._to_tensor(image_sar, expected_channels=2)
             sar_feat = self.sar_encoder(sar_t)
             optical_feat = torch.zeros(sar_feat.shape[0], self.fusion_head.optical_dim,
                                         device=self.device)

@@ -113,8 +113,12 @@ class VQAModel(BaseRSModel):
 
         import torch
 
-        # Convert numpy array to PIL Image
-        if isinstance(image, np.ndarray):
+        from PIL import Image
+
+        # Convert to PIL Image
+        if isinstance(image, str):
+            pil_image = Image.open(image).convert("RGB")
+        elif isinstance(image, np.ndarray):
             pil_image = self._numpy_to_pil(image)
         else:
             pil_image = image

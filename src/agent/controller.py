@@ -62,14 +62,16 @@ class AgentController:
         params = self._build_predict_kwargs(images, query, mode)
         trace.add_tool_call(name=tool.name, task=task, params={"query": query, "mode": mode})
 
-        # TODO(Person 4, once a person's model is wired up):
-        # result = tool.predict(**params)   # returns RSModelResult.to_dict()
-        # For now, return a stub so the rest of the pipeline (GUI, trace,
-        # reporting) can be built and tested before ML notebooks finish.
-        result = tool._empty_result(
-            text="[stub] Model not yet implemented — this is a placeholder response.",
-            confidence=0.0,
-        )
+        # Run real model inference with graceful fallback
+        try:
+            result = tool.predict(**params)
+        except Exception as e:
+            trace.add_warning(f"Inference exception in {tool.name}: {e}")
+            result = tool._empty_result(
+                text=f"Analysis failed — see execution trace ({e})",
+                confidence=0.0,
+                status="error",
+            )
 
         # 4. Confidence flag
         if result["confidence"] < self.confidence_threshold:
@@ -104,18 +106,33 @@ class AgentController:
         }
 
     def _build_predict_kwargs(self, images: dict, query: str, mode: str) -> dict:
-        """Map validated image paths -> the kwargs each model's predict()
-        expects (see docs/api_contracts.md table).
+        """Map validated image paths -> the kwargs each model's predict() expects."""
+        import numpy as np
+        from src.preprocessing.geotiff_utils import read_image
 
-        TODO(Person 4): once preprocessing is wired in, load + preprocess
-        images here (not just pass raw paths) before calling tool.predict().
-        """
+        def _resolve_image(val):
+            if isinstance(val, (np.ndarray, list)):
+                return val
+            if isinstance(val, str):
+                try:
+                    rs = read_image(val)
+                    return rs.array
+                except Exception:
+                    return val
+            return val
+
         if mode == "single":
-            return {"image": images["image"], "query": query}
+            return {"image": _resolve_image(images["image"]), "query": query}
         if mode == "cross_modal":
-            return {"image_optical": images["image_optical"],
-                    "image_sar": images["image_sar"], "query": query}
+            return {
+                "image_optical": _resolve_image(images["image_optical"]),
+                "image_sar": _resolve_image(images["image_sar"]),
+                "query": query,
+            }
         if mode == "bi_temporal":
-            return {"image_t1": images["image_t1"],
-                    "image_t2": images["image_t2"], "query": query}
+            return {
+                "image_t1": _resolve_image(images["image_t1"]),
+                "image_t2": _resolve_image(images["image_t2"]),
+                "query": query,
+            }
         raise ValueError(f"Unknown mode: {mode}")

@@ -13,6 +13,8 @@ data/processed/*
 !data/processed/.gitkeep
 data/*.png
 data/*.jpg
+data/dataset/
+*.crdownload
 models/checkpoints/*
 !models/checkpoints/.gitkeep
 *.pt
