@@ -30,3 +30,7 @@ app/static/reports/*
 
 # Notebooks checkpoints
 .ipynb_checkpoints/
+
+# Local planning guides
+SatQuery-AI-FINAL-PLAN-v2.md
+SatQuery-AI-SIMPLE-GUIDE.md
