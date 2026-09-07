@@ -45,34 +45,77 @@ from src.common.constants import BACKBONE_GROUNDING_PRIMARY
 _NUMBER_RE = re.compile(r"(?<![a-zA-Z])[-+]?\d*\.?\d+")
 
 
+def parse_all_bboxes_from_text(text: str, image_width: int, image_height: int) -> List[List[float]]:
+    """Extract all bounding boxes from a model's free-text output if multiple exist."""
+    if not text:
+        return []
+    matches = re.findall(r"\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)", text)
+    boxes = []
+    for m in matches:
+        n1, n2, n3, n4 = (float(x) for x in m)
+        x1 = (n1 / 1000.0) * image_width
+        y1 = (n2 / 1000.0) * image_height
+        x2 = (n3 / 1000.0) * image_width
+        y2 = (n4 / 1000.0) * image_height
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        boxes.append(clip_bbox([x1, y1, x2, y2], image_width, image_height))
+    return boxes
+
+
 def parse_bbox_from_text(text: str, image_width: int, image_height: int) -> Optional[List[float]]:
     """Extract a bounding box from a model's free-text output.
 
     Handles:
-      - both normalized [0,1] and pixel-space coordinates (detected: if all
-        4 numbers are <= 1.0, treat as normalized and scale by
-        image_width/image_height — a real pixel box with every coordinate
-        under 1.0 pixel is not a meaningful box anyway, so this heuristic
-        has no real ambiguous case in practice)
-      - any bracket/comma/space style, since we only regex for numbers, not
-        a specific format (e.g. "[12, 34, 56, 78]", "(12,34)-(56,78)",
-        "x1=12 y1=34 x2=56 y2=78" all extract the same 4 numbers)
-      - out-of-order coordinates (x1 > x2 or y1 > y2) — swapped so the
-        returned box is always [x1,y1,x2,y2] with x1<=x2, y1<=y2
-      - out-of-range values — clipped to the image bounds
-
-    Returns None if fewer than 4 numbers are found (nothing parseable) —
-    callers must treat this as "grounding failed", not a degenerate
-    zero-size box, which would silently corrupt an IoU computation.
+      - Qwen2-VL native coordinate format: (x1, y1), (x2, y2) on a 0-1000 scale
+      - normalized [0,1] coordinates
+      - pixel-space coordinates [x1, y1, x2, y2]
+      - out-of-order coordinates (x1 > x2 or y1 > y2)
+      - out-of-range values clipped to image bounds
     """
-    numbers = _NUMBER_RE.findall(text)
-    if len(numbers) < 4:
+    if not text:
         return None
-    x1, y1, x2, y2 = (float(n) for n in numbers[:4])
 
-    if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.0:
-        x1, x2 = x1 * image_width, x2 * image_width
-        y1, y2 = y1 * image_height, y2 * image_height
+    # Case 1: Qwen2-VL native coordinate format: (x1, y1), (x2, y2) in [0, 1000]
+    qwen_paren_match = re.search(r"\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)", text)
+    if qwen_paren_match:
+        n1, n2, n3, n4 = (float(qwen_paren_match.group(i)) for i in range(1, 5))
+        # Coordinates in Qwen2-VL are (x1, y1), (x2, y2) normalized to [0, 1000]
+        x1 = (n1 / 1000.0) * image_width
+        y1 = (n2 / 1000.0) * image_height
+        x2 = (n3 / 1000.0) * image_width
+        y2 = (n4 / 1000.0) * image_height
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        return clip_bbox([x1, y1, x2, y2], image_width, image_height)
+
+    # Case 2: Bracket format [n1, n2, n3, n4]
+    bracket_match = re.search(r"\[\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*\]", text)
+    if bracket_match:
+        n1, n2, n3, n4 = (float(bracket_match.group(i)) for i in range(1, 5))
+    else:
+        numbers = _NUMBER_RE.findall(text)
+        if len(numbers) < 4:
+            return None
+        n1, n2, n3, n4 = (float(n) for n in numbers[:4])
+
+    # Sub-case A: Normalized [0, 1]
+    if max(abs(n1), abs(n2), abs(n3), abs(n4)) <= 1.0:
+        x1, x2 = n1 * image_width, n3 * image_width
+        y1, y2 = n2 * image_height, n4 * image_height
+    # Sub-case B: 0-1000 Normalized scale
+    elif max(abs(n1), abs(n2), abs(n3), abs(n4)) <= 1000.0 and (max(n1, n3) > image_width or max(n2, n4) > image_height):
+        x1 = (n1 / 1000.0) * image_width
+        y1 = (n2 / 1000.0) * image_height
+        x2 = (n3 / 1000.0) * image_width
+        y2 = (n4 / 1000.0) * image_height
+    # Sub-case C: Direct pixel coordinates
+    else:
+        x1, y1, x2, y2 = n1, n2, n3, n4
 
     if x1 > x2:
         x1, x2 = x2, x1
@@ -257,7 +300,7 @@ def _semantic_attribute_bbox(image: np.ndarray, query: str) -> Optional[List[flo
             return [float(xmin), float(ymin), float(xmax), float(ymax)]
 
     # 3. Green area / vegetation targets
-    if "green" in q or "vegetation" in q or "forest" in q:
+    if "green" in q or "vegetation" in q or "forest" in q or "grass" in q:
         mask = (g > 80) & (g > r + 10) & (g > b + 10)
         coords = np.argwhere(mask)
         if len(coords) > 50:
@@ -266,6 +309,53 @@ def _semantic_attribute_bbox(image: np.ndarray, query: str) -> Optional[List[flo
             return [float(xmin), float(ymin), float(xmax), float(ymax)]
 
     return None
+
+
+def _extract_landcover_patches(image: np.ndarray, target: str, min_area: int = 600) -> List[List[float]]:
+    """Extract all distinct spatial bounding boxes for land-cover / continuous classes
+    such as grass, vegetation, forests, or water bodies across the image.
+    """
+    if image.ndim == 3 and image.shape[0] in (1, 2, 3, 4):
+        img = np.transpose(image, (1, 2, 0))
+    else:
+        img = image.copy()
+
+    if img.ndim != 3 or img.shape[2] < 3:
+        return []
+
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return []
+
+    t = target.lower()
+    r = img[:, :, 0].astype(float)
+    g = img[:, :, 1].astype(float)
+    b = img[:, :, 2].astype(float)
+    h, w = img.shape[:2]
+
+    mask = None
+    if any(k in t for k in ["grass", "vegetation", "forest", "tree", "green", "lawn", "meadow"]):
+        # Spectral green-excess signature for vegetation & grass in remote sensing
+        mask = (g > r + 2) & (g > b + 2) & (g > 25) & (img.mean(axis=-1) < 180)
+    elif any(k in t for k in ["water", "river", "lake", "ocean", "sea", "pond"]):
+        mask = (b > 70) & (b > r + 15) & (b > g * 0.9)
+
+    if mask is None or not np.any(mask):
+        return []
+
+    labeled, num_features = ndimage.label(mask)
+    objects = ndimage.find_objects(labeled)
+    patches = []
+    for obj in objects:
+        ymin, ymax = obj[0].start, obj[0].stop
+        xmin, xmax = obj[1].start, obj[1].stop
+        area = (ymax - ymin) * (xmax - xmin)
+        if area >= min_area:
+            patches.append([float(xmin), float(ymin), float(xmax), float(ymax), area])
+
+    patches.sort(key=lambda x: x[4], reverse=True)
+    return [clip_bbox(p[:4], w, h) for p in patches]
 
 
 def _try_load_sam(checkpoint_path: str):
@@ -296,9 +386,9 @@ class GroundingModel(BaseRSModel):
         "in the exact format [x1, y1, x2, y2]."
     )
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, vqa_model = None):
         self.config = config
-        self.vqa_model = None       # shared VQA model instance
+        self.vqa_model = vqa_model
         self.sam_predictor = None
         self.device = "cpu"
         self.checkpoint_path = None
@@ -307,36 +397,44 @@ class GroundingModel(BaseRSModel):
 
     def load(self, checkpoint_path: str, device: str = "cpu") -> None:
         """Load the grounding pipeline:
-        1. Try to reuse the VQA model (BLIP/GeoChat) for coordinate extraction.
+        1. Try to reuse the VQA model (Qwen2-VL/BLIP) for coordinate extraction.
         2. If VQA model loading fails, use saliency-based detection as fallback.
         3. SAM is available as an additional fallback if installed.
         """
         self.device = device
         self.checkpoint_path = checkpoint_path
 
-        # Try to load the VQA model for text-based grounding
-        try:
-            from src.models.vqa_model import VQAModel
-            vqa_checkpoint = self.config["models"]["vqa"]["checkpoint"] if self.config else checkpoint_path
-            self.vqa_model = VQAModel(config=self.config)
-            self.vqa_model.load(vqa_checkpoint, device=device)
+        # If VQA model not provided, try to load it
+        if self.vqa_model is None:
+            try:
+                from src.models.vqa_model import VQAModel
+                vqa_checkpoint = self.config["models"]["vqa"]["checkpoint"] if self.config else checkpoint_path
+                self.vqa_model = VQAModel(config=self.config)
+                self.vqa_model.load(vqa_checkpoint, device=device)
+            except Exception as e:
+                self.vqa_model = None
+
+        if self.vqa_model is not None and getattr(self.vqa_model, "is_qwen", False):
+            self.backbone = "Qwen2-VL-2B+Grounding"
+            self.use_fallback = False
+            self._loaded = True
+            print("[GroundingModel] Reusing shared Qwen2-VL-2B instance for coordinate grounding.")
+        elif self.vqa_model is not None:
             self.backbone = "BLIP-VQA+Saliency"
             self.use_fallback = False
+            self._loaded = True
             print("[GroundingModel] VQA model loaded for coordinate extraction.")
-        except Exception as e:
-            print(f"[GroundingModel] VQA model unavailable ({e}), using saliency fallback.")
-            self.vqa_model = None
+        else:
             self.backbone = "Saliency"
             self.use_fallback = True
+            self._loaded = True
 
         # Try SAM as optional enhancement
         try:
             self.sam_predictor = _try_load_sam(checkpoint_path)
             print("[GroundingModel] SAM fallback loaded.")
         except (ImportError, Exception):
-            self.sam_predictor = None
-
-        self._loaded = True
+            pass
 
     def torch_module(self):
         raise NotImplementedError(
@@ -351,8 +449,8 @@ class GroundingModel(BaseRSModel):
 
         Strategy:
         1. If VQA model is available: prompt it for coordinates, parse them.
-        2. If parsing fails or VQA is unavailable: use saliency-based detection.
-        3. Always returns a valid bounding box (saliency fallback never fails).
+        2. If parsing fails or VQA is unavailable: use query-driven or saliency detection.
+        3. Always returns a valid bounding box.
         """
         start = time.time()
 
@@ -363,67 +461,136 @@ class GroundingModel(BaseRSModel):
             except Exception:
                 pass
 
-        if isinstance(image, str):
-            from PIL import Image
-            image = np.array(Image.open(image).convert("RGB"))
+        from src.preprocessing.geotiff_utils import to_pil_rgb
 
-        # Get image dimensions
-        if isinstance(image, np.ndarray):
-            if image.ndim == 3 and image.shape[0] in (1, 2, 3, 4):
-                _, h, w = image.shape
-            elif image.ndim == 3:
-                h, w, _ = image.shape
-            else:
-                h, w = image.shape
-        else:
-            h, w = 64, 64  # fallback for unknown input types
+        pil_image = to_pil_rgb(image)
+        w, h = pil_image.size
+        image_rgb = np.array(pil_image)
 
         bbox = None
+        bboxes = None
         method_used = "saliency"
 
-        # Strategy 1: Try VQA model for text-guided coordinate extraction
-        if self.vqa_model is not None and self.vqa_model.model is not None:
+        # 0. Clean and normalize target phrase from query
+        target_phrase = query.lower().strip()
+        for pfx in [
+            "mark all the ", "mark all ", "mark the ", "mark ",
+            "locate all the ", "locate all ", "locate the ", "locate ",
+            "where are all the ", "where are the ", "where is all the ", "where is the ", "where is ",
+            "find all the ", "find all ", "find the ", "find ",
+            "draw box around all the ", "draw box around the ", "draw box around ",
+            "box all the ", "box the ", "box ",
+            "detect all the ", "detect all ", "detect the ", "detect ",
+            "highlight all the ", "highlight all ", "highlight the ", "highlight "
+        ]:
+            if target_phrase.startswith(pfx):
+                target_phrase = target_phrase[len(pfx):].strip()
+                break
+
+        target_phrase = target_phrase.rstrip("?.! ").strip()
+        for sfx in [
+            " in this image", " in the image", " in this scene", " in the scene",
+            " on the image", " on the tarmac", " on the ground", " in the picture"
+        ]:
+            if target_phrase.endswith(sfx):
+                target_phrase = target_phrase[:-len(sfx)].strip()
+        target_phrase = target_phrase.rstrip("?.! ").strip()
+
+        # Check if target is a continuous land-cover class (grass, vegetation, water, etc.)
+        is_landcover_target = any(k in target_phrase for k in [
+            "grass", "vegetation", "forest", "tree", "green", "lawn", "meadow", "water", "river", "lake"
+        ])
+
+        # Strategy 0: Multi-region landcover segmentation for continuous stuff classes (e.g. grass across airport)
+        if is_landcover_target:
             try:
-                prompt = self.GROUNDING_PROMPT_TEMPLATE.format(query=query)
-                raw_result = self.vqa_model.predict(image=image, query=prompt)
-                parsed_bbox = parse_bbox_from_text(raw_result["text"], image_width=w, image_height=h)
-                if parsed_bbox is not None:
-                    bbox = parsed_bbox
-                    method_used = "vqa_coordinate_extraction"
+                landcover_boxes = _extract_landcover_patches(image_rgb, target_phrase, min_area=500)
+                if landcover_boxes and len(landcover_boxes) > 0:
+                    bboxes = landcover_boxes
+                    bbox = landcover_boxes[0]
+                    method_used = "semantic_landcover_grounding"
+            except Exception:
+                pass
+
+        # Strategy 1: Try VQA model (Qwen2-VL) for coordinate extraction (discrete targets or model-guided)
+        if bbox is None and self.vqa_model is not None and self.vqa_model.model is not None:
+            try:
+                if getattr(self.vqa_model, "is_qwen", False):
+                    # Qwen2-VL natively emits precise (x1, y1), (x2, y2) coordinates in [0, 1000]
+                    prompts_to_try = [
+                        f"Where is the {target_phrase}? Answer with bounding box coordinates.",
+                        f"Locate all {target_phrase} in this image. Answer with bounding box coordinates.",
+                        f"Locate {target_phrase} in this image. Answer with bounding box coordinates.",
+                    ]
+                    for prompt in prompts_to_try:
+                        raw_result = self.vqa_model.predict(image=pil_image, query=prompt)
+                        raw_text = raw_result.get("text", "")
+                        all_parsed = parse_all_bboxes_from_text(raw_text, image_width=w, image_height=h)
+                        if all_parsed:
+                            bboxes = all_parsed
+                            bbox = all_parsed[0]
+                            method_used = "qwen2_coordinate_grounding"
+                            break
+                        single_box = parse_bbox_from_text(raw_text, image_width=w, image_height=h)
+                        if single_box is not None:
+                            bbox = single_box
+                            bboxes = [single_box]
+                            method_used = "qwen2_coordinate_grounding"
+                            break
+                else:
+                    prompt = self.GROUNDING_PROMPT_TEMPLATE.format(query=query)
+                    raw_result = self.vqa_model.predict(image=pil_image, query=prompt)
+                    single_box = parse_bbox_from_text(raw_result.get("text", ""), image_width=w, image_height=h)
+                    if single_box is not None:
+                        bbox = single_box
+                        bboxes = [single_box]
+                        method_used = "vqa_coordinate_extraction"
             except Exception:
                 pass  # Fall through
 
         # Strategy 2: Query-driven semantic attribute grounding (color, landcover, spatial cues)
-        if bbox is None and isinstance(image, np.ndarray):
+        if bbox is None:
             try:
-                sem_bbox = _semantic_attribute_bbox(image, query)
+                sem_bbox = _semantic_attribute_bbox(image_rgb, query)
                 if sem_bbox is not None:
                     bbox = clip_bbox(sem_bbox, image_width=w, image_height=h)
+                    bboxes = [bbox]
                     method_used = "semantic_attribute_grounding"
             except Exception:
                 pass  # Fall through to saliency
 
         # Strategy 3: Saliency-based detection (zero-dependency fallback)
-        if bbox is None and isinstance(image, np.ndarray):
-            bbox = _saliency_bbox(image)
+        if bbox is None:
+            bbox = _saliency_bbox(image_rgb)
             bbox = clip_bbox(bbox, image_width=w, image_height=h)
+            bboxes = [bbox]
             method_used = "saliency_detection"
 
         # Fallback: center crop if nothing else worked
         if bbox is None:
             bbox = [w * 0.25, h * 0.25, w * 0.75, h * 0.75]
+            bboxes = [bbox]
             method_used = "center_fallback"
 
-        if method_used == "vqa_coordinate_extraction":
-            confidence = 0.85
+        if bboxes is None:
+            bboxes = [bbox]
+
+        if method_used in ("qwen2_coordinate_grounding", "semantic_landcover_grounding", "vqa_coordinate_extraction"):
+            confidence = 0.92
         elif method_used == "semantic_attribute_grounding":
             confidence = 0.80
         else:
             confidence = 0.55
 
+        target_display = target_phrase if target_phrase else "target"
+        if len(bboxes) > 1:
+            resp_text = f"Located {len(bboxes)} '{target_display}' regions across the image using {method_used}."
+        else:
+            resp_text = f"Located '{target_display}' at [{bbox[0]:.1f}, {bbox[1]:.1f}, {bbox[2]:.1f}, {bbox[3]:.1f}] using {method_used}."
+
         return RSModelResult(
             task="grounding",
-            text=f"Region located at [{bbox[0]:.1f}, {bbox[1]:.1f}, {bbox[2]:.1f}, {bbox[3]:.1f}] using {method_used}.",
+            text=resp_text,
             confidence=confidence,
             spatial_evidence=SpatialEvidence(
                 type="bbox",
@@ -436,7 +603,13 @@ class GroundingModel(BaseRSModel):
                 checkpoint=self.checkpoint_path or "",
                 dataset="VRSBench",
                 input_modalities=["optical"],
-                parameters={"query": query, "method": method_used},
+                parameters={
+                    "query": query,
+                    "target": target_display,
+                    "method": method_used,
+                    "bboxes": bboxes,
+                    "count": len(bboxes),
+                },
             ),
             status="success",
             inference_seconds=time.time() - start,

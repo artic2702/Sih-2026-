@@ -94,22 +94,26 @@ datasets:
 models:
   vqa:
     name: "vqa_v1"
-    backbone: "GeoChat"
+    backbone: "Qwen2-VL-2B"
+    model_id: "Qwen/Qwen2-VL-2B-Instruct"
+    fallback_backbone: "BLIP-VQA"
     owner: "person_1"
-    image_size: 336                 # TODO(Person 1): confirm GeoChat's expected input size
-    checkpoint: "models/checkpoints/geochat/lora_adapter"
+    image_size: 336
+    checkpoint: "models/checkpoints/qwen2_vl"
     adaptation_dataset: "bigearthnet"
     eval_datasets: ["rsvqa", "vrsbench"]
-    train: true                     # LoRA fine-tuning — mandatory RS adaptation
+    train: false
 
   captioning:
     name: "caption_v1"
-    backbone: "GeoChat"             # shares Person 1's checkpoint, different prompt
+    backbone: "Qwen2-VL-2B"
+    model_id: "Qwen/Qwen2-VL-2B-Instruct"
+    fallback_backbone: "BLIP-Captioning"
     owner: "person_1"
-    enabled: true                   # team's chosen 2nd single-image task
-    checkpoint: "models/checkpoints/geochat/lora_adapter"
+    enabled: true
+    checkpoint: "models/checkpoints/qwen2_vl"
     eval_datasets: ["vrsbench"]
-    train: false                    # reuse VQA adapter unless quality demands otherwise
+    train: false
 
   grounding:
     name: "grounding_v1"

@@ -20,8 +20,8 @@ With 24 hours remaining and 8 GB VRAM:
 
 | Member | Workstream / Task | Backbone Architecture | Files Owned (Only Edit These!) | Compute / VRAM Footprint |
 | :--- | :--- | :--- | :--- | :--- |
-| **Person 1** | **Single-Image VQA & Captioning** | Pretrained **GeoChat-7B** (4-bit)<br>*(Emergency Fallback: BLIP-VQA)* | • `src/models/vqa_model.py`<br>• `src/models/captioning_model.py`<br>• `notebooks/01_vqa_geochat.ipynb` | ~4.2 GB VRAM (GeoChat 4-bit)<br>~1.2 GB VRAM (BLIP) |
-| **Person 2** | **Text-Guided Region Grounding** | **GeoChat Coordinate Prompting**<br>*(Fallback: SAM / OWL-ViT)* | • `src/models/grounding_model.py`<br>• `notebooks/02_grounding.ipynb` | ~1.5 GB VRAM<br>(Zero training required) |
+| **Person 1** | **Single-Image VQA & Captioning** | **Qwen2-VL-2B-Instruct** (fp16/bf16)<br>*(Fallback: BLIP-VQA / Captioning)* | • `src/models/vqa_model.py`<br>• `src/models/captioning_model.py`<br>• `notebooks/01_vqa_geochat.ipynb` | ~4.5 GB VRAM (RTX 4060 GPU)<br>~1.2 GB VRAM (BLIP fallback) |
+| **Person 2** | **Text-Guided Region Grounding** | **Qwen2-VL Coordinate Grounding**<br>*(Fallback: Saliency / SAM)* | • `src/models/grounding_model.py`<br>• `notebooks/02_grounding.ipynb` | ~1.5 GB VRAM<br>(Zero training required) |
 | **Person 3** | **Bi-Temporal Change Detection** | **Siamese Difference + Otsu**<br>*(Optional: Pretrained VisTA)* | • `src/models/change_model.py`<br>• `notebooks/03_change_vista.ipynb` | < 500 MB VRAM / CPU<br>(Zero training required) |
 | **Person 4** | **Optical–SAR Fusion & UI Integration** | **Dual ResNet-18** (4-band Optical + 2-band SAR) + MLP Head | • `src/models/fusion_model.py`<br>• `notebooks/04_optical_sar_fusion.ipynb`<br>• `train_fusion.py`<br>• `src/agent/tool_registry.py`<br>• `app/app.py` | ~1.8 GB VRAM<br>(Train locally for 15-20 min) |
 
@@ -32,8 +32,8 @@ With 24 hours remaining and 8 GB VRAM:
 ### 👤 Person 1: Single-Image VQA & Captioning
 * **Mission**: Make `predict(image, query)` for VQA and `predict(image)` for captioning return real text without raising `NotImplementedError`.
 * **Approach**:
-  1. **Primary**: Load pretrained GeoChat-7B in 4-bit (`load_in_4bit=True` via `transformers` and `bitsandbytes`).
-  2. **Emergency Fallback (Fastest & Safest)**: Use `Salesforce/blip-vqa-base` and `Salesforce/blip-image-captioning-base`. This downloads in 2 minutes, runs in < 1.5 GB VRAM, and guarantees working outputs.
+  1. **Primary**: Load **`Qwen/Qwen2-VL-2B-Instruct`** in fp16 on GPU (`Qwen2VLForConditionalGeneration` + `AutoProcessor`). Generates articulate multi-sentence answers, complex spatial reasoning, and detailed remote-sensing descriptions.
+  2. **Emergency Fallback (Fastest & Safest)**: Automatic fallback to `Salesforce/blip-vqa-base` and `Salesforce/blip-image-captioning-base` if offline or downloading.
 * **Return Contract**:
   ```python
   from src.common.schemas import RSModelResult
@@ -43,7 +43,7 @@ With 24 hours remaining and 8 GB VRAM:
       text=answer_string,
       confidence=0.88,
       status="success",
-      metadata={"model": "GeoChat-7B", "backbone": "LLaVA-RS"},
+      metadata={"model": "vqa_v1", "backbone": "Qwen2-VL-2B"},
       inference_seconds=elapsed_time
   ).to_dict()
   ```

@@ -32,6 +32,12 @@ class ExecutionTrace:
     def set_input_metadata(self, metadata: dict):
         self.input_metadata = metadata
 
+    def add_metadata(self, key: str, value: object):
+        if not hasattr(self, "metadata"):
+            self.metadata = {}
+        self.metadata[key] = value
+        self.input_metadata[key] = value
+
     def add_tool_call(self, name: str, task: str, params: dict = None):
         self.tools_used.append({
             "tool_name": name,

@@ -117,6 +117,121 @@ def _read_plain_image(path: str) -> RSImage:
         )
 
 
+def to_pil_rgb(source, sar_mode: str = "grayscale", target_min_size: int = 360) -> "Image.Image":
+    """Convert any satellite image representation into a crisp, viewable 8-bit RGB PIL Image.
+
+    Supports:
+    - Sentinel-1 SAR dual-pol GeoTIFF (2-band float32 VV/VH backscatter in dB):
+      * "grayscale": Clean, high-contrast radar intensity (VV backscatter) where buildings
+        and hard structures pop bright white and water/flat ground is dark. (Recommended)
+      * "composite": Dual-pol false-color composite (R=VV, G=VH, B=ratio).
+    - Sentinel-2 multi-spectral GeoTIFF (12-band uint16 reflectance) -> True Color RGB (B4, B3, B2).
+    - 4-band / 3-band / 1-band GeoTIFFs or numpy arrays.
+    - Standard benchmark formats (PNG, JPEG, WebP).
+    - Anti-aliased high-quality Lanczos resampling to prevent low-res pixelation.
+    """
+    from PIL import Image
+
+    if isinstance(source, Image.Image):
+        return source.convert("RGB")
+
+    arr = None
+    if isinstance(source, (str, bytes)) or hasattr(source, "read"):
+        try:
+            import tifffile
+            arr = tifffile.imread(source)
+        except Exception:
+            try:
+                with Image.open(source) as im:
+                    return im.convert("RGB")
+            except Exception as e:
+                raise ValueError(f"Could not load image from source {source}: {e}")
+    elif hasattr(source, "array"):  # RSImage
+        arr = source.array
+    elif hasattr(source, "detach"):  # torch.Tensor
+        arr = source.detach().cpu().numpy()
+    elif isinstance(source, np.ndarray):
+        arr = source
+    else:
+        raise ValueError(f"Unsupported source type for to_pil_rgb: {type(source)}")
+
+    if arr is None:
+        raise ValueError("Failed to obtain image array")
+
+    if arr.ndim == 2:
+        arr = arr[np.newaxis, ...]
+    elif arr.ndim == 3:
+        if arr.shape[0] not in (1, 2, 3, 4, 12) and arr.shape[2] in (1, 2, 3, 4, 12):
+            arr = np.transpose(arr, (2, 0, 1))
+
+    c, h, w = arr.shape
+
+    out_img = None
+
+    if c == 12:
+        # Sentinel-2: B4(Red)=idx 3, B3(Green)=idx 2, B2(Blue)=idx 1
+        r = arr[3].astype(np.float32)
+        g = arr[2].astype(np.float32)
+        b = arr[1].astype(np.float32)
+        rgb = np.stack([r, g, b], axis=-1)
+        p2, p98 = np.percentile(rgb, 2), np.percentile(rgb, 98)
+        norm = np.clip((rgb - p2) / max(float(p98 - p2), 1e-5), 0, 1) * 255.0
+        out_img = Image.fromarray(norm.astype(np.uint8), "RGB")
+
+    elif c >= 4:
+        rgb = np.transpose(arr[:3], (1, 2, 0)).astype(np.float32)
+        p2, p98 = np.percentile(rgb, 2), np.percentile(rgb, 98)
+        norm = np.clip((rgb - p2) / max(float(p98 - p2), 1e-5), 0, 1) * 255.0
+        out_img = Image.fromarray(norm.astype(np.uint8), "RGB")
+
+    elif c == 2:
+        # Sentinel-1 SAR: VV and VH polarizations in dB
+        from scipy.ndimage import median_filter
+        vv = median_filter(arr[0].astype(np.float32), size=3)
+        vh = median_filter(arr[1].astype(np.float32), size=3)
+
+        if sar_mode == "grayscale":
+            # Calibrated Radar Intensity: bright specular reflections for buildings, dark for water
+            p2, p98 = np.percentile(vv, 2), np.percentile(vv, 98)
+            norm = np.clip((vv - p2) / max(float(p98 - p2), 1e-5), 0, 1) * 255.0
+            gray = norm.astype(np.uint8)
+            out_img = Image.fromarray(np.stack([gray] * 3, axis=-1), "RGB")
+        else:
+            # Dual-pol composite with cross-ratio
+            p2_vv, p98_vv = np.percentile(vv, 2), np.percentile(vv, 98)
+            p2_vh, p98_vh = np.percentile(vh, 2), np.percentile(vh, 98)
+            r = np.clip((vv - p2_vv) / max(float(p98_vv - p2_vv), 1e-5), 0, 1) * 255.0
+            g = np.clip((vh - p2_vh) / max(float(p98_vh - p2_vh), 1e-5), 0, 1) * 255.0
+            b = np.clip((vv - vh + 5.0) / 15.0, 0, 1) * 255.0
+            rgb = np.stack([r, g, b], axis=-1).astype(np.uint8)
+            out_img = Image.fromarray(rgb, "RGB")
+
+    elif c == 3:
+        if arr.dtype == np.uint8 and arr.min() >= 0 and arr.max() <= 255:
+            out_img = Image.fromarray(np.transpose(arr, (1, 2, 0)), "RGB")
+        else:
+            rgb = np.transpose(arr, (1, 2, 0)).astype(np.float32)
+            p2, p98 = np.percentile(rgb, 2), np.percentile(rgb, 98)
+            norm = np.clip((rgb - p2) / max(float(p98 - p2), 1e-5), 0, 1) * 255.0
+            out_img = Image.fromarray(norm.astype(np.uint8), "RGB")
+
+    else:  # c == 1
+        gray = arr[0].astype(np.float32)
+        p2, p98 = np.percentile(gray, 2), np.percentile(gray, 98)
+        norm = np.clip((gray - p2) / max(float(p98 - p2), 1e-5), 0, 1) * 255.0
+        gray_8u = norm.astype(np.uint8)
+        out_img = Image.fromarray(np.stack([gray_8u] * 3, axis=-1), "RGB")
+
+    # Anti-aliased Lanczos smoothing if original tile is small (prevents pixelated blockiness)
+    if target_min_size and max(out_img.size) < target_min_size:
+        scale = max(target_min_size / out_img.size[0], target_min_size / out_img.size[1])
+        new_w, new_h = int(out_img.size[0] * scale), int(out_img.size[1] * scale)
+        out_img = out_img.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+    return out_img
+
+
+
 def check_coregistration(img_a: RSImage, img_b: RSImage, tolerance_px: float = 1.0) -> dict:
     """Check whether two RSImages are co-registered (same CRS, comparable
     extent/resolution) — required for cross-modal (optical+SAR) and

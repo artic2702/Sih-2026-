@@ -190,10 +190,21 @@ class ChangeModel(BaseRSModel):
                 status="error",
             )
 
-        # Per-band absolute difference, averaged across bands -> single
-        # change-magnitude map in [0, 1] (inputs are assumed already
-        # normalized to [0, 1] by the shared preprocessing pipeline).
-        diff = np.mean(np.abs(image_t1 - image_t2), axis=0)
+        # Ensure float32 normalized in [0, 1] to prevent uint8 underflow
+        t1 = image_t1.astype(np.float32)
+        t2 = image_t2.astype(np.float32)
+        if t1.max() > 1.0:
+            t1 = t1 / 255.0
+        if t2.max() > 1.0:
+            t2 = t2 / 255.0
+
+        if t1.ndim == 3 and t1.shape[0] in (1, 2, 3, 4, 12):
+            diff = np.mean(np.abs(t1 - t2), axis=0)
+        elif t1.ndim == 3:
+            diff = np.mean(np.abs(t1 - t2), axis=-1)
+        else:
+            diff = np.abs(t1 - t2)
+
         diff = np.clip(diff, 0.0, 1.0)
 
         threshold = _otsu_threshold(diff)
