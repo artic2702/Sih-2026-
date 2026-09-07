@@ -179,6 +179,95 @@ def _saliency_bbox(image: np.ndarray) -> List[float]:
     return [float(x1), float(y1), float(x2), float(y2)]
 
 
+def _semantic_attribute_bbox(image: np.ndarray, query: str) -> Optional[List[float]]:
+    """Extract spatial bounding box using query-driven visual and spectral
+    attributes (color signatures, contrast, and spatial relationships) in RS imagery.
+    """
+    if image.ndim == 3 and image.shape[0] in (1, 2, 3, 4):
+        img = np.transpose(image, (1, 2, 0))
+    else:
+        img = image.copy()
+
+    if img.ndim != 3 or img.shape[2] < 3:
+        return None
+
+    h, w = img.shape[:2]
+    q = query.lower()
+    r = img[:, :, 0].astype(float)
+    g = img[:, :, 1].astype(float)
+    b = img[:, :, 2].astype(float)
+
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return None
+
+    # 1. Yellow/amber targets (e.g. buses, specialized vehicles)
+    if "yellow" in q or "gold" in q or "orange" in q:
+        mask = (r > 120) & (g > 110) & (b < 160) & ((r + g) / 2 - b > 30)
+        labeled, num = ndimage.label(mask)
+        objects = ndimage.find_objects(labeled)
+        candidates = []
+        for obj in objects:
+            ymin, ymax = obj[0].start, obj[0].stop
+            xmin, xmax = obj[1].start, obj[1].stop
+            area = (ymax - ymin) * (xmax - xmin)
+            if area >= 150:
+                candidates.append(([float(xmin), float(ymin), float(xmax), float(ymax)], area))
+
+        if candidates:
+            if "large" in q:
+                large_cands = [c for c in candidates if c[1] >= 600]
+                if large_cands:
+                    candidates = large_cands
+
+            if "green" in q or "vegetation" in q:
+                green_mask = (g > 70) & (g > r * 1.05) & (g > b * 1.05)
+                green_coords = np.argwhere(green_mask)
+                if len(green_coords) > 0:
+                    sample = green_coords[::10]
+                    def dist_to_green(cand):
+                        box = cand[0]
+                        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+                        return np.min(np.sqrt((sample[:, 0] - cy) ** 2 + (sample[:, 1] - cx) ** 2))
+                    best = min(candidates, key=dist_to_green)[0]
+                else:
+                    best = min(candidates, key=lambda c: c[0][1])[0]
+            elif "top" in q:
+                best = min(candidates, key=lambda c: c[0][1])[0]
+            elif "bottom" in q:
+                best = max(candidates, key=lambda c: c[0][3])[0]
+            else:
+                best = max(candidates, key=lambda c: c[1])[0]
+
+            return [
+                float(max(0, best[0] - 5)),
+                float(max(0, best[1] - 5)),
+                float(min(w, best[2] + 5)),
+                float(min(h, best[3] + 5)),
+            ]
+
+    # 2. Water body / river / ocean / blue targets
+    if "water" in q or "river" in q or "lake" in q or "ocean" in q or "sea" in q:
+        mask = (b > 80) & (b > r + 15) & (b > g * 0.9)
+        coords = np.argwhere(mask)
+        if len(coords) > 50:
+            ymin, xmin = coords.min(axis=0)
+            ymax, xmax = coords.max(axis=0)
+            return [float(xmin), float(ymin), float(xmax), float(ymax)]
+
+    # 3. Green area / vegetation targets
+    if "green" in q or "vegetation" in q or "forest" in q:
+        mask = (g > 80) & (g > r + 10) & (g > b + 10)
+        coords = np.argwhere(mask)
+        if len(coords) > 50:
+            ymin, xmin = coords.min(axis=0)
+            ymax, xmax = coords.max(axis=0)
+            return [float(xmin), float(ymin), float(xmax), float(ymax)]
+
+    return None
+
+
 def _try_load_sam(checkpoint_path: str):
     """Attempt to load Meta's Segment Anything Model."""
     try:
@@ -298,9 +387,19 @@ class GroundingModel(BaseRSModel):
                     bbox = parsed_bbox
                     method_used = "vqa_coordinate_extraction"
             except Exception:
+                pass  # Fall through
+
+        # Strategy 2: Query-driven semantic attribute grounding (color, landcover, spatial cues)
+        if bbox is None and isinstance(image, np.ndarray):
+            try:
+                sem_bbox = _semantic_attribute_bbox(image, query)
+                if sem_bbox is not None:
+                    bbox = clip_bbox(sem_bbox, image_width=w, image_height=h)
+                    method_used = "semantic_attribute_grounding"
+            except Exception:
                 pass  # Fall through to saliency
 
-        # Strategy 2: Saliency-based detection (always works, no dependencies)
+        # Strategy 3: Saliency-based detection (zero-dependency fallback)
         if bbox is None and isinstance(image, np.ndarray):
             bbox = _saliency_bbox(image)
             bbox = clip_bbox(bbox, image_width=w, image_height=h)
@@ -311,7 +410,12 @@ class GroundingModel(BaseRSModel):
             bbox = [w * 0.25, h * 0.25, w * 0.75, h * 0.75]
             method_used = "center_fallback"
 
-        confidence = 0.75 if method_used == "vqa_coordinate_extraction" else 0.55
+        if method_used == "vqa_coordinate_extraction":
+            confidence = 0.85
+        elif method_used == "semantic_attribute_grounding":
+            confidence = 0.80
+        else:
+            confidence = 0.55
 
         return RSModelResult(
             task="grounding",

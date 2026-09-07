@@ -87,20 +87,33 @@ def run_vrsbench_eval():
 
     query = "The large yellow vehicle situated closest to the green area."
     res_g = ground.predict(image=img_np, query=query)
-    bbox = res_g["spatial_evidence"]["bbox"]  # [ymin, xmin, ymax, xmax]
-    print(f"Query:     \"{query}\"")
-    print(f"Predicted BBox: {bbox}")
-    print("VRSBench Truth: Normalized coordinates {<25><40><33><60>}")
+    bbox = res_g["spatial_evidence"]["bbox"]
 
-    # Draw detected bbox and save
+    # In src.common.schemas.SpatialEvidence, bbox is [x1, y1, x2, y2]
+    x1, y1, x2, y2 = bbox
+    print(f"Query:          \"{query}\"")
+    print(f"Predicted BBox: [{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
+    print("VRSBench Truth: [131, 205, 171, 309] (Normalized {<25><40><33><60>})")
+
+    # Draw both Ground Truth (Green) and Model Prediction (Red)
     boxed = pil_img.copy()
     draw = ImageDraw.Draw(boxed)
-    ymin, xmin, ymax, xmax = bbox
-    draw.rectangle([xmin, ymin, xmax, ymax], outline=(255, 0, 0), width=4)
+    
+    # Ground Truth: Green box around the actual yellow bus
+    gt_box = [131, 205, 171, 309]
+    draw.rectangle(gt_box, outline=(0, 255, 0), width=4)
+    draw.text((gt_box[0], max(0, gt_box[1] - 18)), "VRSBench Truth (Bus)", fill=(0, 255, 0))
+
+    # Model Prediction: Red box
+    pred_box = [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))]
+    draw.rectangle(pred_box, outline=(255, 50, 50), width=3)
+    draw.text((pred_box[0], max(0, pred_box[1] - 18)), "Model Prediction", fill=(255, 50, 50))
 
     out_path = PROJECT_ROOT / "data" / "P0003_0002_grounded.png"
     boxed.save(out_path)
     print(f"\nVisual Grounding output saved to: {out_path}")
+    print("  -> GREEN BOX: Ground Truth yellow bus location [131, 205, 171, 309]")
+    print(f"  -> RED BOX:   Model prediction [{x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f}]")
     print("=" * 65)
     print("VRSBENCH EVALUATION COMPLETE — ALL 3 TASKS EXECUTED SUCCESSFULLY")
     print("=" * 65)
