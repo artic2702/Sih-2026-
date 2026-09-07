@@ -12,31 +12,19 @@ from src.agent.input_validator import validate_input
 from src.agent.task_router import route_task
 from src.agent.tool_registry import ToolRegistry
 from src.agent.execution_trace import ExecutionTrace
+from src.agent.verification_gate import VerificationGate
 
 
 class AgentController:
     def __init__(self, config: dict, device: str = "cpu"):
         self.config = config
         self.registry = ToolRegistry(config, device=device)
+        self.verification_gate = VerificationGate(config)
         self.confidence_threshold = config["agent"]["confidence_threshold"]
 
     def run(self, images: dict, query: str) -> dict:
         """images: see input_validator.validate_input for expected keys.
         query: natural-language question/instruction from the user.
-
-        Returns:
-            {
-              "success": bool,
-              "task": str | None,
-              "text": str | None,
-              "confidence": float | None,
-              "spatial_evidence": {"type":.., "source":.., "bbox": list|None, "mask": np.ndarray|None} | None,
-              "metadata": {"model":.., "backbone":.., "checkpoint":.., "dataset":..,
-                           "input_modalities": [...], "parameters": {...}} | None,
-              "status": "success" | "error" | "low_confidence" | None,
-              "errors": list[str],
-              "trace": dict,
-            }
         """
         # 1. Validate input
         validation = validate_input(images, self.config)
@@ -73,12 +61,30 @@ class AgentController:
                 status="error",
             )
 
-        # 4. Confidence flag
-        if result["confidence"] < self.confidence_threshold:
-            trace.add_warning(
-                f"Low confidence ({result['confidence']:.2f} < {self.confidence_threshold})"
-            )
-        trace.set_confidence(result["confidence"])
+        # 4. Evidence Verification Gate
+        verification = self.verification_gate.verify(
+            query=query,
+            task=task,
+            images=images,
+            result=result,
+        )
+        if hasattr(trace, "add_metadata"):
+            trace.add_metadata("verification", verification.to_dict())
+        elif hasattr(trace, "input_metadata"):
+            trace.input_metadata["verification"] = verification.to_dict()
+
+        # Determine final status and evidence
+        if verification.decision == "FALLBACK_GEE" and verification.gee_evidence:
+            trace.add_warning(f"Verification Gate activated GEE fallback: {verification.reasons}")
+            status = "gee_fallback"
+        elif verification.decision == "UNVERIFIED":
+            status = "unverified"
+            if verification.reasons:
+                trace.add_warning(f"Verification warning: {'; '.join(verification.reasons)}")
+        else:
+            status = "verified" if verification.passed else "success"
+
+        trace.set_confidence(result.get("confidence", 0.0))
 
         return {
             "success": True,
@@ -87,7 +93,8 @@ class AgentController:
             "confidence": result["confidence"],
             "spatial_evidence": result.get("spatial_evidence"),
             "metadata": result.get("metadata"),
-            "status": result.get("status"),
+            "verification": verification.to_dict(),
+            "status": status,
             "errors": [],
             "trace": trace.finalize(),
         }

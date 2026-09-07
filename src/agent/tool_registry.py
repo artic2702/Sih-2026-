@@ -36,17 +36,17 @@ class ToolRegistry:
     def _build_registry(self):
         model_cfg = self.config["models"]
 
-        # VQA is always required (Person 1 — GeoChat).
-        self.register(VQAModel(config=self.config), model_cfg["vqa"]["checkpoint"])
+        # VQA is always required (Person 1 — Qwen2-VL / GeoChat).
+        vqa_tool = VQAModel(config=self.config)
+        self.register(vqa_tool, model_cfg["vqa"]["checkpoint"])
 
-        # Captioning is GeoChat-shared by default; grounding (Person 2) can
-        # be GeoChat-based or fall back to a dedicated model — both are
-        # registered under the same "grounding" task key regardless of which
-        # backbone ends up being used internally.
+        # Captioning and Grounding share the Vision-Language Model backbone to conserve VRAM
         if model_cfg.get("captioning", {}).get("enabled", True):
-            self.register(CaptioningModel(config=self.config), model_cfg["captioning"]["checkpoint"])
+            cap_tool = CaptioningModel(config=self.config, vqa_model=vqa_tool)
+            self.register(cap_tool, model_cfg["captioning"]["checkpoint"])
         if model_cfg.get("grounding", {}).get("enabled", True):
-            self.register(GroundingModel(config=self.config), model_cfg["grounding"]["checkpoint"])
+            ground_tool = GroundingModel(config=self.config, vqa_model=vqa_tool)
+            self.register(ground_tool, model_cfg["grounding"]["checkpoint"])
 
         self.register(ChangeModel(config=self.config), model_cfg["change"]["checkpoint"])
         self.register(FusionModel(config=self.config), model_cfg["fusion"]["checkpoint"])

@@ -18,83 +18,89 @@ from src.common.schemas import RSModelResult, SpatialEvidence, ResultMetadata
 class CaptioningModel(BaseRSModel):
     name = "caption_v1"
     task = "captioning"
-    backbone = "BLIP-Captioning"
+    backbone = "Qwen2-VL-2B"
 
-    # Remote-sensing-specific prompt prefixes that guide BLIP to generate
-    # satellite-relevant descriptions instead of generic "a photo of..."
     RS_CAPTION_PROMPTS = [
-        "a satellite image of",
+        "Describe this aerial or satellite remote-sensing image in detail, noting visible land cover, buildings, vehicles, or natural terrain.",
         "an aerial view showing",
     ]
 
-    def __init__(self, config: dict = None):
-        self.config = config
+    def __init__(self, config: dict = None, vqa_model = None):
+        self.config = config or {}
+        self.vqa_model = vqa_model
         self.model = None
         self.processor = None
         self.device = "cpu"
         self.checkpoint_path = None
+        self.is_qwen = False
 
-    def load(self, checkpoint_path: str, device: str = "cpu") -> None:
-        """Load the BLIP Captioning model from HuggingFace (auto-downloads
-        ~900 MB on first run, cached afterwards).
-        """
+    def load(self, checkpoint_path: str = "", device: str = "cpu") -> None:
+        """Load Qwen2-VL-2B (or fallback to BLIP-Captioning)."""
         import torch
-        from transformers import BlipProcessor, BlipForConditionalGeneration
 
-        self.device = device if torch.cuda.is_available() and device != "cpu" else "cpu"
+        self.device = device if torch.cuda.is_available() and device != "cpu" else ("cuda" if torch.cuda.is_available() else "cpu")
         self.checkpoint_path = checkpoint_path
 
-        model_id = "Salesforce/blip-image-captioning-base"
-        print(f"[CaptioningModel] Loading {model_id} on {self.device}...")
+        # If a pre-loaded VQA model is available, reuse its loaded weights directly
+        if self.vqa_model is not None and self.vqa_model.model is not None:
+            self.model = self.vqa_model.model
+            self.processor = self.vqa_model.processor
+            self.device = self.vqa_model.device
+            self.is_qwen = getattr(self.vqa_model, "is_qwen", False)
+            self.backbone = self.vqa_model.backbone
+            print(f"[CaptioningModel] Reusing shared {self.backbone} instance on {self.device}.")
+            return
 
-        self.processor = BlipProcessor.from_pretrained(model_id)
-        self.model = BlipForConditionalGeneration.from_pretrained(model_id, use_safetensors=True)
+        cap_cfg = self.config.get("models", {}).get("captioning", {}) if isinstance(self.config, dict) else {}
+        preferred_backbone = cap_cfg.get("backbone", "Qwen2-VL-2B")
+        model_id = cap_cfg.get("model_id", "Qwen/Qwen2-VL-2B-Instruct")
 
-        # Use half precision on GPU to save VRAM
+        if preferred_backbone == "Qwen2-VL-2B":
+            try:
+                print(f"[CaptioningModel] Loading {model_id} on {self.device}...")
+                from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+
+                dtype = torch.float16 if self.device == "cuda" else torch.float32
+                self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    model_id,
+                    torch_dtype=dtype,
+                    device_map="auto" if self.device == "cuda" else None,
+                )
+                if self.device != "cuda":
+                    self.model.to(self.device)
+
+                self.processor = AutoProcessor.from_pretrained(model_id)
+                self.model.eval()
+                self.is_qwen = True
+                self.backbone = "Qwen2-VL-2B"
+                print(f"[CaptioningModel] Qwen2-VL-2B loaded successfully on {self.device}.")
+                return
+            except Exception as e:
+                print(f"[CaptioningModel] Warning: Could not load Qwen2-VL ({e}). Falling back to BLIP-Captioning...")
+
+        # Fallback to BLIP Captioning
+        from transformers import BlipProcessor, BlipForConditionalGeneration
+        blip_id = "Salesforce/blip-image-captioning-base"
+        print(f"[CaptioningModel] Loading fallback {blip_id} on {self.device}...")
+        self.processor = BlipProcessor.from_pretrained(blip_id)
+        self.model = BlipForConditionalGeneration.from_pretrained(blip_id, use_safetensors=True)
         if self.device != "cpu":
             self.model = self.model.half()
         self.model.to(self.device)
         self.model.eval()
+        self.is_qwen = False
+        self.backbone = "BLIP-Captioning"
+        print(f"[CaptioningModel] BLIP-Captioning fallback loaded successfully on {self.device}.")
 
-        print(f"[CaptioningModel] Loaded successfully on {self.device}.")
-
-    def _numpy_to_pil(self, image: np.ndarray):
-        """Convert a numpy array (C,H,W) or (H,W,C) to PIL RGB image."""
-        from PIL import Image
-
-        if image.ndim == 3 and image.shape[0] in (1, 2, 3, 4):
-            image = np.transpose(image, (1, 2, 0))
-
-        if image.ndim == 3 and image.shape[2] > 3:
-            image = image[:, :, :3]
-
-        if image.ndim == 2:
-            image = np.stack([image] * 3, axis=-1)
-        elif image.ndim == 3 and image.shape[2] == 1:
-            image = np.concatenate([image] * 3, axis=-1)
-
-        if image.dtype in (np.float32, np.float64):
-            if image.max() <= 1.0:
-                image = (image * 255).clip(0, 255).astype(np.uint8)
-            else:
-                image = image.clip(0, 255).astype(np.uint8)
-
-        return Image.fromarray(image, "RGB")
+    def _numpy_to_pil(self, image):
+        """Convert any satellite image representation to a PIL RGB Image."""
+        from src.preprocessing.geotiff_utils import to_pil_rgb
+        return to_pil_rgb(image)
 
     def predict(self, image, query: str = None, **kwargs) -> dict:
-        """Generate a scene caption for the given image.
-
-        Args:
-            image: np.ndarray (C,H,W) or (H,W,C), or PIL Image.
-            query: Optional conditioning text. If None, uses an RS-specific
-                   prompt prefix to guide the caption generation.
-
-        Returns:
-            dict matching RSModelResult schema.
-        """
+        """Generate a detailed scene caption for the satellite image."""
         start = time.time()
 
-        # Auto-load if not loaded yet
         if self.model is None:
             try:
                 self.load(self.checkpoint_path or "", device=self.device)
@@ -105,58 +111,90 @@ class CaptioningModel(BaseRSModel):
                 )
 
         import torch
+        from src.preprocessing.geotiff_utils import to_pil_rgb
 
-        from PIL import Image
-
-        # Convert to PIL
-        if isinstance(image, str):
-            pil_image = Image.open(image).convert("RGB")
-        elif isinstance(image, np.ndarray):
-            pil_image = self._numpy_to_pil(image)
-        else:
-            pil_image = image
+        pil_image = to_pil_rgb(image)
 
         try:
-            # Use RS-specific prompt prefix for better satellite descriptions
-            prompt = query if query else self.RS_CAPTION_PROMPTS[0]
+            if self.is_qwen:
+                try:
+                    from qwen_vl_utils import process_vision_info
+                    has_qwen_utils = True
+                except ImportError:
+                    has_qwen_utils = False
 
-            # Conditional captioning (with prompt prefix)
-            inputs = self.processor(images=pil_image, text=prompt, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                prompt = query if query else self.RS_CAPTION_PROMPTS[0]
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": pil_image},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ]
+                text_prompt = self.processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
 
-            if self.device != "cpu":
-                inputs = {k: v.half() if v.dtype == torch.float32 else v
-                          for k, v in inputs.items()}
+                if has_qwen_utils:
+                    image_inputs, video_inputs = process_vision_info(messages)
+                    inputs = self.processor(
+                        text=[text_prompt],
+                        images=image_inputs,
+                        videos=video_inputs,
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                else:
+                    inputs = self.processor(
+                        text=[text_prompt],
+                        images=[pil_image],
+                        padding=True,
+                        return_tensors="pt",
+                    )
 
-            with torch.no_grad():
-                output_ids = self.model.generate(**inputs, max_length=80)
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            caption = self.processor.decode(output_ids[0], skip_special_tokens=True).strip()
+                with torch.no_grad():
+                    output_ids = self.model.generate(
+                        **inputs,
+                        max_new_tokens=128,
+                        do_sample=False,
+                    )
 
-            # Also generate an unconditional caption for comparison/confidence
-            inputs_uncond = self.processor(images=pil_image, return_tensors="pt")
-            inputs_uncond = {k: v.to(self.device) for k, v in inputs_uncond.items()}
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids):]
+                    for in_ids, out_ids in zip(inputs["input_ids"], output_ids)
+                ]
+                final_caption = self.processor.batch_decode(
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )[0].strip()
 
-            if self.device != "cpu":
-                inputs_uncond = {k: v.half() if v.dtype == torch.float32 else v
-                                 for k, v in inputs_uncond.items()}
+                confidence = 0.90
 
-            with torch.no_grad():
-                uncond_ids = self.model.generate(**inputs_uncond, max_length=80)
+            else:
+                prompt = query if query else self.RS_CAPTION_PROMPTS[1]
+                inputs = self.processor(images=pil_image, text=prompt, return_tensors="pt")
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            uncond_caption = self.processor.decode(uncond_ids[0], skip_special_tokens=True).strip()
+                if self.device != "cpu":
+                    inputs = {k: v.half() if v.dtype == torch.float32 else v
+                              for k, v in inputs.items()}
 
-            # Use the longer, more detailed caption
-            final_caption = caption if len(caption) > len(uncond_caption) else uncond_caption
+                with torch.no_grad():
+                    output_ids = self.model.generate(**inputs, max_length=80)
 
-            # Confidence heuristic: longer, more detailed captions are more useful
-            confidence = min(0.90, 0.5 + len(final_caption.split()) * 0.03)
+                final_caption = self.processor.decode(output_ids[0], skip_special_tokens=True).strip()
+                confidence = min(0.90, 0.5 + len(final_caption.split()) * 0.03)
 
             return RSModelResult(
                 task="captioning",
                 text=final_caption,
                 confidence=confidence,
-                spatial_evidence=SpatialEvidence(),  # captioning has no bbox/mask
+                spatial_evidence=SpatialEvidence(),
                 metadata=ResultMetadata(
                     model=self.name,
                     backbone=self.backbone,

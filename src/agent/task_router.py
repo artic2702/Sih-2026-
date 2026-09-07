@@ -12,10 +12,12 @@ TASK_LABELS = ["vqa", "captioning", "grounding", "change", "fusion"]
 _KEYWORDS = {
     "change": ["changed", "change", "before and after", "increased", "decreased",
                "difference between", "over time"],
-    "grounding": ["highlight", "locate", "where is", "point to", "mark the", "show me the region"],
-    "captioning": ["describe", "caption", "summarize the image", "what is in this image"],
+    "grounding": ["mark", "locate", "where is", "point to", "highlight", "find",
+                  "bounding box", "bbox", "draw box", "show me the region", "localize", "detect"],
+    "captioning": ["describe", "caption", "summarize", "tell me about", "what is in this image",
+                   "what does this image show", "overview of the scene"],
     "fusion": ["optical and sar", "sar and optical", "combine", "together to identify",
-               "using both images"],
+               "using both images", "multi-modal", "multimodal"],
 }
 
 

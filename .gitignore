@@ -6,22 +6,40 @@ venv/
 .env
 *.egg-info/
 
+# Scratch & temporary debug
+scratch/
+test_*.png
+
 # Data & models (never commit large binary data/weights)
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+data/*.txt
+data/*.json
+data/*.md
+data/vrsbench_samples/*.json
 data/*.png
+!data/P0003_0002.png
 data/*.jpg
 dataset/
 data/dataset/
-data/sample_*/
+datasettemp/
+data/datasettemp/
 extracted_fusion_colab/
+
+# Keep preloaded benchmark app samples
+!data/sample_bigearthnet/
+!data/sample_bigearthnet/**
+!data/sample_bitemporal/
+!data/sample_bitemporal/**
+!data/vrsbench_samples/*.png
 *.zip
 *.tar
 *.tar.gz
 *.tif
 *.tiff
+!data/sample_bigearthnet/*.tif
 *.h5
 *.hdf5
 *.nc

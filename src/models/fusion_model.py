@@ -155,7 +155,8 @@ class FusionModel(BaseRSModel):
         self.checkpoint_path = None
         self.labels = BIGEARTHNET_19_LABELS
         self.encoder_weights_status = {"optical": None, "sar": None}
-        self.text_threshold = 0.5  # probability cutoff for "significant" in the template
+        agent_cfg = self.config.get("agent", {}) if self.config else {}
+        self.text_threshold = agent_cfg.get("confidence_threshold", 0.4)
 
     def load(self, checkpoint_path: str, device: str = "cpu") -> None:
         """Build both encoders (frozen by default) + fusion head, then load
@@ -247,6 +248,15 @@ class FusionModel(BaseRSModel):
             array = torch.from_numpy(array).float()
         if array.dim() == 3:
             array = array.unsqueeze(0)  # add batch dim
+
+        # Auto-normalize inputs to [0, 1] range expected by the ResNet encoders
+        arr_min = array.min()
+        arr_max = array.max()
+        if arr_max > 1.0 or arr_min < 0.0:
+            denom = arr_max - arr_min
+            if denom > 1e-6:
+                array = (array - arr_min) / denom
+
         if expected_channels is not None:
             c = array.shape[1]
             if c > expected_channels:
