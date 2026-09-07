@@ -175,7 +175,7 @@ satquery-ai/
 └── docs/                         # architecture.md, team_roles.md, api_contracts.md
 ```
 
-## 6. Ground Rules
+## 6. Ground Rules:
 
 - **Config-driven**: no hardcoded paths/hyperparameters in code — read from `configs/config.yaml`. Preprocessing is per-dataset and per-model, not global (see `docs/architecture.md`).
 - **Interfaces first**: every model class inherits `BaseRSModel` (`src/models/base_model.py`) and returns `src.common.schemas.RSModelResult(...).to_dict()` so the controller can call any model the same way. This output shape is frozen — don't hand-roll a different one.
