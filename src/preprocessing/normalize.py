@@ -89,6 +89,13 @@ def normalize(array: np.ndarray, method: str = "per_band_minmax") -> np.ndarray:
             out[c] = (band - lo) / (hi - lo) if hi > lo else np.zeros_like(band)
         return out
 
+    if method == "db_minmax":
+        # BigEarthNet-S1 v2 stores Sentinel-1 VV/VH already in dB. Do NOT
+        # apply 10*log10 again; simply scale the dB values to [0, 1].
+        db_min, db_max = -25.0, 0.0
+        db = np.clip(array, db_min, db_max)
+        return (db - db_min) / (db_max - db_min)
+
     if method == "db_scale_minmax":
         # Mirrors sensor_adapters/sentinel1.py's DB_MIN/DB_MAX convention.
         # Kept as a local constant (not an import) so this generic path
@@ -116,13 +123,14 @@ def normalize(array: np.ndarray, method: str = "per_band_minmax") -> np.ndarray:
         out = np.empty_like(array)
         for c in range(array.shape[0]):
             band = array[c]
-            mean, std = float(band.mean()), float(band.std())
+            mean = np.mean(band)
+            std = np.std(band)
             out[c] = (band - mean) / std if std > 1e-8 else np.zeros_like(band)
         return out
 
     raise ValueError(
         f"Unknown normalization method '{method}'. Known methods: "
-        f"per_band_minmax, percentile_2_98, db_scale_minmax, imagenet, zscore."
+        f"per_band_minmax, percentile_2_98, db_scale_minmax, db_minmax, imagenet, zscore."
     )
 
 

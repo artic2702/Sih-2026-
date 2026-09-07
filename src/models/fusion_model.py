@@ -37,6 +37,7 @@ with random-init encoders is a legitimate SMOKE_TEST / architecture
 validation, NOT a reportable benchmark number — see docs/ML_AUDIT.md.
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -191,11 +192,28 @@ class FusionModel(BaseRSModel):
         self.fusion_head = FusionHead(optical_dim=512, sar_dim=512, num_classes=num_classes)
 
         self._checkpoint_loaded = False
-        try:
-            state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            self.fusion_head.load_state_dict(state["model_state_dict"])
-            self._checkpoint_loaded = True
-        except FileNotFoundError:
+        candidates = [
+            checkpoint_path,
+            checkpoint_path + ".pt",
+            "models/checkpoints/fusion/fusion_head/model.pt",
+            "models/checkpoints/fusion_head.pt",
+            "models/checkpoints/fusion/fusion_head",
+        ]
+        resolved_ckpt = None
+        for cand in candidates:
+            if cand and os.path.isfile(cand):
+                resolved_ckpt = cand
+                break
+
+        if resolved_ckpt is not None:
+            try:
+                state = torch.load(resolved_ckpt, map_location=device, weights_only=False)
+                self.fusion_head.load_state_dict(state["model_state_dict"])
+                self._checkpoint_loaded = True
+                self.checkpoint_path = resolved_ckpt
+            except Exception as e:
+                print(f"[fusion_model] Failed to load checkpoint from '{resolved_ckpt}': {e}")
+        else:
             print(
                 f"[fusion_model] No trained fusion-head checkpoint at "
                 f"'{checkpoint_path}' — fusion_head is freshly initialized "
@@ -224,11 +242,18 @@ class FusionModel(BaseRSModel):
 
     # -- inference -----------------------------------------------------
 
-    def _to_tensor(self, array) -> torch.Tensor:
+    def _to_tensor(self, array, expected_channels: int = None) -> torch.Tensor:
         if isinstance(array, np.ndarray):
             array = torch.from_numpy(array).float()
         if array.dim() == 3:
             array = array.unsqueeze(0)  # add batch dim
+        if expected_channels is not None:
+            c = array.shape[1]
+            if c > expected_channels:
+                array = array[:, :expected_channels]
+            elif c < expected_channels:
+                repeats = (expected_channels // c) + 1
+                array = array.repeat(1, repeats, 1, 1)[:, :expected_channels]
         return array.to(self.device)
 
     def _labels_to_text(self, probs: np.ndarray) -> str:
@@ -251,8 +276,8 @@ class FusionModel(BaseRSModel):
 
     def _forward(self, optical_arr, sar_arr) -> np.ndarray:
         with torch.no_grad():
-            optical_t = self._to_tensor(optical_arr)
-            sar_t = self._to_tensor(sar_arr)
+            optical_t = self._to_tensor(optical_arr, expected_channels=4)
+            sar_t = self._to_tensor(sar_arr, expected_channels=2)
             optical_feat = self.optical_encoder(optical_t)
             sar_feat = self.sar_encoder(sar_t)
             logits = self.fusion_head(optical_feat, sar_feat)
@@ -305,7 +330,7 @@ class FusionModel(BaseRSModel):
                 text="Fusion model not loaded — call load() first.", status="error")
         start = time.time()
         with torch.no_grad():
-            optical_t = self._to_tensor(image_optical)
+            optical_t = self._to_tensor(image_optical, expected_channels=4)
             optical_feat = self.optical_encoder(optical_t)
             sar_feat = torch.zeros(optical_feat.shape[0], self.fusion_head.sar_dim,
                                     device=self.device)
@@ -322,7 +347,7 @@ class FusionModel(BaseRSModel):
                 text="Fusion model not loaded — call load() first.", status="error")
         start = time.time()
         with torch.no_grad():
-            sar_t = self._to_tensor(image_sar)
+            sar_t = self._to_tensor(image_sar, expected_channels=2)
             sar_feat = self.sar_encoder(sar_t)
             optical_feat = torch.zeros(sar_feat.shape[0], self.fusion_head.optical_dim,
                                         device=self.device)

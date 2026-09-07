@@ -58,20 +58,38 @@ def read_image(path: str) -> RSImage:
 
 
 def _read_geotiff(path: str) -> RSImage:
-    if rasterio is None:
-        raise ImportError("rasterio is required to read GeoTIFF files. pip install rasterio")
-    with rasterio.open(path) as src:
-        array = src.read()  # (C, H, W)
+    if rasterio is not None:
+        with rasterio.open(path) as src:
+            array = src.read()  # (C, H, W)
+            return RSImage(
+                array=array,
+                crs=str(src.crs) if src.crs else None,
+                transform=src.transform,
+                bounds=tuple(src.bounds),
+                resolution=(src.res[0], src.res[1]),
+                band_count=src.count,
+                dtype=str(src.dtypes[0]),
+                source_path=path,
+            )
+    try:
+        import tifffile
+        array = tifffile.imread(path)
+        if array.ndim == 2:
+            array = array[np.newaxis, ...]
+        elif array.ndim == 3 and array.shape[2] in (1, 2, 3, 4, 12):
+            array = np.transpose(array, (2, 0, 1))
         return RSImage(
             array=array,
-            crs=str(src.crs) if src.crs else None,
-            transform=src.transform,
-            bounds=tuple(src.bounds),
-            resolution=(src.res[0], src.res[1]),
-            band_count=src.count,
-            dtype=str(src.dtypes[0]),
+            crs=None,
+            transform=None,
+            bounds=None,
+            resolution=None,
+            band_count=array.shape[0],
+            dtype=str(array.dtype),
             source_path=path,
         )
+    except ImportError:
+        raise ImportError("rasterio or tifffile is required to read GeoTIFF files. pip install tifffile")
 
 
 def _read_plain_image(path: str) -> RSImage:
