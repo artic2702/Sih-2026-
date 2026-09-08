@@ -146,8 +146,9 @@ class FusionModel(BaseRSModel):
     task = "fusion"
     backbone = BACKBONE_FUSION  # "OpticalSAR-FeatureFusion"
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, vqa_model=None):
         self.config = config
+        self.vqa_model = vqa_model  # shared Qwen2-VL instance for query-aware responses
         self.optical_encoder = None
         self.sar_encoder = None
         self.fusion_head = None
@@ -294,17 +295,127 @@ class FusionModel(BaseRSModel):
             probs = torch.sigmoid(logits).cpu().numpy()[0]
         return probs
 
+    def _query_vlm(self, image, query: str, classification_context: str) -> str:
+        """Use the shared Qwen2-VL to generate a query-aware natural language
+        answer from the optical image, augmented by the fusion classifier's
+        land-cover probabilities as context. Falls back to the template if
+        the VLM is unavailable."""
+        if self.vqa_model is None or self.vqa_model.model is None:
+            return None
+
+        import torch
+        from src.preprocessing.geotiff_utils import to_pil_rgb
+
+        try:
+            pil_image = to_pil_rgb(image)
+
+            augmented_prompt = (
+                f"You are analyzing a satellite scene that has both an optical image and a SAR radar image. "
+                f"The cross-modal fusion classifier detected the following land-cover classes with probabilities:\n"
+                f"{classification_context}\n\n"
+                f"Using the image and the classification context above, answer the user's question:\n"
+                f"{query}"
+            )
+
+            if getattr(self.vqa_model, 'is_qwen', False):
+                try:
+                    from qwen_vl_utils import process_vision_info
+                    has_qwen_utils = True
+                except ImportError:
+                    has_qwen_utils = False
+
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": pil_image},
+                            {"type": "text", "text": augmented_prompt},
+                        ],
+                    }
+                ]
+                text_prompt = self.vqa_model.processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+
+                if has_qwen_utils:
+                    image_inputs, video_inputs = process_vision_info(messages)
+                    inputs = self.vqa_model.processor(
+                        text=[text_prompt],
+                        images=image_inputs,
+                        videos=video_inputs,
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                else:
+                    inputs = self.vqa_model.processor(
+                        text=[text_prompt],
+                        images=[pil_image],
+                        padding=True,
+                        return_tensors="pt",
+                    )
+
+                inputs = {k: v.to(self.vqa_model.device) for k, v in inputs.items()}
+
+                with torch.no_grad():
+                    output_ids = self.vqa_model.model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        do_sample=False,
+                    )
+
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids):]
+                    for in_ids, out_ids in zip(inputs["input_ids"], output_ids)
+                ]
+                answer = self.vqa_model.processor.batch_decode(
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )[0].strip()
+                return answer
+            else:
+                # BLIP fallback — simpler, still query-aware
+                inputs = self.vqa_model.processor(
+                    images=pil_image, text=query, return_tensors="pt"
+                )
+                inputs = {k: v.to(self.vqa_model.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    output_ids = self.vqa_model.model.generate(**inputs, max_length=50)
+                answer = self.vqa_model.processor.decode(
+                    output_ids[0], skip_special_tokens=True
+                ).strip()
+                return answer
+
+        except Exception as e:
+            print(f"[FusionModel] VLM query failed ({e}), falling back to template.")
+            return None
+
+    def _build_classification_context(self, probs: np.ndarray) -> str:
+        """Format the top classification results into a readable context string."""
+        ranked = sorted(
+            [(self.labels[i], float(p)) for i, p in enumerate(probs)],
+            key=lambda x: -x[1]
+        )
+        lines = []
+        for label, prob in ranked[:5]:  # top 5 classes
+            pct = prob * 100
+            lines.append(f"  - {label}: {pct:.1f}%")
+        return "\n".join(lines)
+
     def _result_from_probs(self, probs: np.ndarray, modalities: list,
-                            elapsed: float) -> dict:
+                            elapsed: float, text_override: str = None) -> dict:
         status = "success" if getattr(self, "_checkpoint_loaded", False) else "low_confidence"
         confidence = float(np.max(probs))
+        backbone_used = self.backbone
+        if text_override:
+            backbone_used = f"{self.backbone}+Qwen2-VL"
         return RSModelResult(
             task="fusion",
-            text=self._labels_to_text(probs),
+            text=text_override or self._labels_to_text(probs),
             confidence=confidence,
             spatial_evidence=SpatialEvidence(),  # segmentation head is a stretch goal, not built this pass
             metadata=ResultMetadata(
-                model=self.name, backbone=self.backbone,
+                model=self.name, backbone=backbone_used,
                 checkpoint=self.checkpoint_path or "",
                 dataset="BigEarthNet-MM",
                 input_modalities=modalities,
@@ -312,6 +423,7 @@ class FusionModel(BaseRSModel):
                     "class_probabilities": {lbl: float(p) for lbl, p in zip(self.labels, probs)},
                     "encoder_weights": self.encoder_weights_status,
                     "checkpoint_loaded": getattr(self, "_checkpoint_loaded", False),
+                    "vlm_augmented": text_override is not None,
                 },
             ),
             status=status,
@@ -324,8 +436,21 @@ class FusionModel(BaseRSModel):
             return self._empty_result(
                 text="Fusion model not loaded — call load() first.", status="error")
         start = time.time()
+
+        # Step 1: Run the ResNet fusion classifier for land-cover probabilities
         probs = self._forward(image_optical, image_sar)
-        return self._result_from_probs(probs, ["optical", "sar"], time.time() - start)
+
+        # Step 2: Use Qwen2-VL to generate a query-aware answer using the
+        # optical image + classification context from step 1
+        vlm_answer = None
+        if self.vqa_model is not None:
+            context = self._build_classification_context(probs)
+            vlm_answer = self._query_vlm(image_optical, query, context)
+
+        return self._result_from_probs(
+            probs, ["optical", "sar"], time.time() - start,
+            text_override=vlm_answer,
+        )
 
     def predict_optical_only(self, image_optical, query: str, **kwargs) -> dict:
         """Baseline leg of the mandatory 3-way ablation: zero the SAR
