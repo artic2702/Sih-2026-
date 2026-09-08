@@ -49,7 +49,7 @@ class ToolRegistry:
             self.register(ground_tool, model_cfg["grounding"]["checkpoint"])
 
         self.register(ChangeModel(config=self.config), model_cfg["change"]["checkpoint"])
-        self.register(FusionModel(config=self.config), model_cfg["fusion"]["checkpoint"])
+        self.register(FusionModel(config=self.config, vqa_model=vqa_tool), model_cfg["fusion"]["checkpoint"])
 
     def register(self, model, checkpoint_path: str):
         """Register specialist model and initialize its weights."""
